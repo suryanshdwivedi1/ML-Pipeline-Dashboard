@@ -414,8 +414,10 @@ if uploaded_file is not None:
                                 if c in numeric_clean]
         outlier_cols = st.multiselect("Columns for outlier removal:", numeric_clean,
                                       default=default_outlier_cols)
-        outlier_method = st.radio("Method:", ["Z-Score", "IQR", "None"], horizontal=True)
-        threshold = 3.0
+        
+        # PRE-SELECTED IQR FOR SKEWED AIRBNB DATA
+        outlier_method = st.radio("Method:", ["IQR", "Z-Score", "None"], index=0, horizontal=True)
+        threshold = 1.5
         if outlier_method == "Z-Score":
             threshold = st.slider("Z-Score threshold", 2.0, 4.0, 3.0, 0.1)
         elif outlier_method == "IQR":
@@ -451,7 +453,7 @@ if uploaded_file is not None:
             st.warning("Cleaned dataset is empty — adjust preprocessing settings.")
         else:
             # Target selection
-            default_target = next((c for c in ["room_type", "price", "log_price"]
+            default_target = next((c for c in ["price", "log_price", "room_type"]
                                     if c in df_train.columns), df_train.columns[0])
             target_col = st.selectbox("Target Variable (Y):", df_train.columns.tolist(),
                                        index=df_train.columns.tolist().index(default_target))
@@ -485,7 +487,7 @@ if uploaded_file is not None:
 
                 algo = st.selectbox("Algorithm:", [
                     "Random Forest Classifier", "KNN Classifier", "Logistic Regression"
-                ])
+                ], index=2) # Defaulting to Logistic for classification baseline
                 c1, c2 = st.columns(2)
 
                 if algo == "Random Forest Classifier":
@@ -520,9 +522,12 @@ if uploaded_file is not None:
                     use_log = st.checkbox("Log-transform target (log1p)", value=True)
 
                 pre = build_preprocessor(X)
+                
+                # PRE-SELECTED LINEAR REGRESSION 
                 algo = st.selectbox("Algorithm:", [
-                    "Random Forest Regressor", "KNN Regressor", "Linear Regression"
-                ])
+                    "Linear Regression", "Random Forest Regressor", "KNN Regressor"
+                ], index=0) 
+                
                 c1, c2 = st.columns(2)
 
                 if algo == "Random Forest Regressor":
@@ -600,6 +605,7 @@ if uploaded_file is not None:
                         "X_test": X_test,
                         "is_log_transform": use_log if not is_classification else False,
                     }
+                    st.session_state.model_obj = model
                     st.success("✅ Model trained! Head to the Evaluation tab.")
 
     # ──────────────────────────────
@@ -762,15 +768,106 @@ if uploaded_file is not None:
                 fig_fi.update_xaxes(gridcolor="#1e2132"); fig_fi.update_yaxes(gridcolor="#1e2132")
                 st.plotly_chart(fig_fi, use_container_width=True)
 
-else:
-    st.markdown("""
-    <div style="text-align:center; padding: 5rem 0; color: #3a3f5a;">
-        <div style="font-size:4rem; margin-bottom:1rem;">🏙️</div>
-        <h2 style="font-family:'Syne',sans-serif; font-size:1.5rem; color:#4a5070; font-weight:700;">
-            Upload your CSV to begin
-        </h2>
-        <p style="font-size:0.9rem; color:#2e3350;">
-            Use the sidebar to upload <code>AB_NYC_2019.csv</code> or any compatible dataset
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
+# ─────────────────────────────────────────────
+            # 🔮 UNIFIED INTERACTIVE PREDICTOR
+            # ─────────────────────────────────────────────
+            if st.session_state.model_obj is not None:
+                st.markdown("---")
+                
+                # Dynamic titles based on whether it's predicting price (regression) or room type (classification)
+                title_text = "Price Predictor" if res["task"] == "regression" else "Category Predictor"
+                st.markdown(f'<p class="section-header">🔮 Interactive {title_text}</p>', unsafe_allow_html=True)
+                st.markdown(f"<p style='color:#8a8fa8; font-size:0.9rem;'>Enter listing details below to predict the <b>{res['target_col']}</b> based on your trained model.</p>", unsafe_allow_html=True)
+
+                expected_features = res["X_test"].columns.tolist()
+
+                # 1. Define allowed columns based on the target task
+                if res["task"] == "regression":
+                    # Predicting Price
+                    allowed_cols = ["room_type", "minimum_nights", "availability_365", "number_of_reviews", "calculated_host_listings_count"]
+                else:
+                    # Predicting Room Type
+                    allowed_cols = ["price", "minimum_nights", "calculated_host_listings_count", "availability_365", "number_of_reviews"]
+
+                # Filter to only show columns that actually exist in the trained model's features
+                visible_features = [col for col in allowed_cols if col in expected_features]
+
+                with st.form("prediction_form"):
+                    cols = st.columns(3)
+                    input_data = {}
+
+                    # 2. Render only the allowed visible features
+                    for i, col_name in enumerate(visible_features):
+                        c = cols[i % 3]
+                        display_name = col_name.replace('_', ' ').title()
+                        
+                        # Create number inputs for numerical columns
+                        if pd.api.types.is_numeric_dtype(res["X_test"][col_name]):
+                            mean_val = float(res["X_test"][col_name].mean())
+                            
+                            # Clean up formatting for integer-based columns
+                            if col_name in ["minimum_nights", "number_of_reviews", "calculated_host_listings_count", "availability_365"]:
+                                input_data[col_name] = c.number_input(f"{display_name}", min_value=0.0, value=float(int(mean_val)), step=1.0)
+                            elif col_name == "price":
+                                input_data[col_name] = c.number_input(f"{display_name}", min_value=0.0, value=mean_val, step=10.0)
+                            else:
+                                input_data[col_name] = c.number_input(f"{display_name}", value=mean_val)
+                        
+                        # Create selectboxes for categorical columns
+                        else:
+                            unique_vals = res["X_test"][col_name].dropna().unique().tolist()
+                            input_data[col_name] = c.selectbox(f"{display_name}", options=unique_vals)
+
+                    submit = st.form_submit_button(f"Predict {res['target_col'].replace('_', ' ').title()}")
+
+                    if submit:
+                        # 3. Construct the full data frame, filling hidden features with defaults
+                        full_input_data = {}
+                        for col in expected_features:
+                            if col in visible_features:
+                                full_input_data[col] = input_data[col]
+                            else:
+                                # Fill missing numeric columns with their mean
+                                if pd.api.types.is_numeric_dtype(res["X_test"][col]):
+                                    full_input_data[col] = float(res["X_test"][col].mean())
+                                # Fill missing categorical columns with their mode
+                                else:
+                                    mode_series = res["X_test"][col].mode()
+                                    full_input_data[col] = mode_series[0] if not mode_series.empty else "Unknown"
+
+                        input_df = pd.DataFrame([full_input_data])
+                        
+                        try:
+                            predicted_val = st.session_state.model_obj.predict(input_df)[0]
+                            
+                            if res["task"] == "regression":
+                                # Handle log transformations and formatting for Regression (Price)
+                                if res["target_col"] == "log_price" and not res.get("is_log_transform", False):
+                                    final_val = np.expm1(predicted_val)
+                                    prefix = "$"
+                                elif res["target_col"] == "price":
+                                    final_val = predicted_val
+                                    prefix = "$"
+                                else:
+                                    final_val = predicted_val
+                                    prefix = ""
+                                    
+                                final_val = max(0, final_val) # Prevent negative prices
+                                display_text = f"{prefix}{final_val:,.2f}"
+                                label_text = f"Estimated {res['target_col'].replace('_', ' ').title()}"
+                                
+                            else:
+                                # Formatting for Classification (Room Type)
+                                display_text = str(predicted_val).upper()
+                                label_text = f"Predicted {res['target_col'].replace('_', ' ').title()}"
+
+                            st.markdown(f"""
+                            <div style="background: linear-gradient(135deg, rgba(124, 110, 245, 0.2) 0%, rgba(91, 78, 212, 0.2) 100%); 
+                                        border: 1px solid #7c6ef5; border-radius: 10px; padding: 1.5rem; text-align: center; margin-top: 1rem;">
+                                <p style="color: #c8ccde; font-size: 1rem; margin: 0; font-family: 'DM Sans', sans-serif;">{label_text}</p>
+                                <h2 style="color: #e8eaf2; font-size: 2.5rem; font-family: 'Syne', sans-serif; margin: 0;">{display_text}</h2>
+                            </div>
+                            """, unsafe_allow_html=True)
+                            
+                        except Exception as e:
+                            st.error(f"Prediction error: {str(e)}. Ensure all data transformations align with the input.")
